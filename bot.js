@@ -52,9 +52,16 @@ const statusCheckLoop = async (openAiThreadId, runId) => {
         await sleep(1000);
         return statusCheckLoop(openAiThreadId, runId);
     }
-    console.log(run);
 
     return run.status;
+}
+
+// Add message to openAi thread
+const addMessage = (openAiThreadId, content) => {
+    return openai.beta.threads.messages.create(
+        openAiThreadId,
+        { role: "user", content: content }
+    );
 }
 
 // Event on receiving a message
@@ -64,23 +71,38 @@ client.on('messageCreate', async message => {
     const discordThreadId = message.channel.id;
     let openAiThreadId = getOpenAiThreadId(discordThreadId);
 
+    let messagesLoaded = false;
     if(!openAiThreadId) {
         const thread = await openai.beta.threads.create();
         openAiThreadId = thread.id;
         addThreadToMap(discordThreadId, openAiThreadId);
+
+        if(message.channel.isThread()) {
+            // Gather all thread messages
+            const starterMsg = await message.channel.fetchStarterMessage();
+            const otherMessagesRaw = await message.channel.messages.fetch();
+            const otherMessages = Array.from(otherMessagesRaw.values())
+                .map(msg => msg.content)
+                .reverse();
+
+            const messages = [starterMsg.content, ... otherMessages]
+                .filter(msg => !!msg && msg !== '');
+
+            await Promise.all(messages.map(msg => addMessage(openAiThreadId, msg)));
+            messagesLoaded = true;
+        }
     }
 
-    await openai.beta.threads.messages.create(
-        openAiThreadId,
-        { role: "user", content: message.content }
-    );
+    if(!messagesLoaded) {
+        await addMessage(openAiThreadId, message.content);
+    }
 
     const run = await openai.beta.threads.runs.create(
         openAiThreadId,
         { assistant_id: process.env.ASSISTANT_ID}
     );
 
-    await statusCheckLoop(openAiThreadId, run.id);
+    const status = await statusCheckLoop(openAiThreadId, run.id);
 
     const messages = await openai.beta.threads.messages.list(openAiThreadId);
     const response = messages.data[0].content[0].text.value;
